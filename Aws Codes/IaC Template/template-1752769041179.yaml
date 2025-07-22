@@ -1,0 +1,295 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Cheapest Infrastructure for AWS ML Project - VPC, S3, Redshift
+  Serverless (4 RPUs)
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for the VPC
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: CIDR for private subnet 1
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: CIDR for private subnet 2
+  PrivateSubnet3Cidr:
+    Type: String
+    Default: 10.0.3.0/24
+    Description: CIDR for private subnet 3
+  RedshiftNamespaceName:
+    Type: String
+    Default: project-namespace
+    Description: Name for Redshift Serverless namespace
+  RedshiftAdminUsername:
+    Type: String
+    Default: admin
+    Description: Admin username for Redshift Serverless
+  RedshiftAdminPassword:
+    Type: String
+    NoEcho: true
+    Description: Admin password for Redshift Serverless (must be 8-64 characters)
+
+Resources:
+  # VPC Setup (Minimal for cost)
+  ProjectVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: ProjectVPC
+
+  # Private Subnets (Three for HA and Redshift requirements)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProjectVPC
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProjectVPC
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet2
+
+  PrivateSubnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProjectVPC
+      CidrBlock: !Ref PrivateSubnet3Cidr
+      AvailabilityZone: !Select
+        - 2
+        - !GetAZs ''
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet3
+
+  # Security Group (Restricted access)
+  ProjectSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Minimal security group for Redshift Serverless and SageMaker
+      VpcId: !Ref ProjectVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5439 # Redshift port
+          ToPort: 5439
+          CidrIp: !Ref VpcCidr # Restrict to VPC only
+        - IpProtocol: tcp
+          FromPort: 443 # HTTPS for endpoints
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+      Tags:
+        - Key: Name
+          Value: ProjectSecurityGroup
+
+  # S3 Buckets (Basic, encrypted)
+  RawDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub project-raw-data-lake-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: RawDataBucket
+
+  ProcessedDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub project-processed-data-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: ProcessedDataBucket
+
+  SageMakerArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub project-sagemaker-artifacts-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: SageMakerArtifactsBucket
+
+  # Redshift Serverless Namespace
+  RedshiftNamespace:
+    Type: AWS::RedshiftServerless::Namespace
+    Properties:
+      NamespaceName: !Ref RedshiftNamespaceName
+      AdminUsername: !Ref RedshiftAdminUsername
+      AdminUserPassword: !Ref RedshiftAdminPassword
+      DbName: projectdb
+      Tags:
+        - Key: Name
+          Value: ProjectNamespace
+
+  # Redshift Serverless Workgroup (4 RPUs for minimal cost)
+  RedshiftWorkgroup:
+    Type: AWS::RedshiftServerless::Workgroup
+    Properties:
+      WorkgroupName: project-workgroup
+      NamespaceName: !Ref RedshiftNamespaceName
+      BaseCapacity: 4 # Minimum 4 RPUs for cheapest entry-level config
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      SecurityGroupIds:
+        - !Ref ProjectSecurityGroup
+      EnhancedVpcRouting: true
+      PubliclyAccessible: false # Keep private to avoid exposure costs
+      Tags:
+        - Key: Name
+          Value: ProjectWorkgroup
+
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueCustomPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::project-raw-data-lake-${AWS::AccountId}/*
+                  - !Sub arn:aws:s3:::project-processed-data-${AWS::AccountId}/*
+                  - !Sub arn:aws:s3:::project-sagemaker-artifacts-${AWS::AccountId}/*
+              - Effect: Allow
+                Action:
+                  - redshift:DescribeClusters
+                  - redshift:ExecuteStatement
+                  - redshift:DescribeQuery
+                Resource: !Sub arn:aws:redshift:${AWS::Region}:${AWS::AccountId}:workgroup:project-workgroup
+      Tags:
+        - Key: Name
+          Value: GlueServiceRole
+
+  # Glue Job 1: ETL Raw Data to Redshift
+  GlueETLJobRawToRedshift:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: GlueETLJobRawToRedshift
+      Role: !GetAtt GlueServiceRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub s3://project-processed-data-${AWS::AccountId}/scripts/GlueETLJobRawToRedshift.py
+        PythonVersion: '3'
+      DefaultArguments:
+        '--job-language': python
+        '--enable-metrics': ''
+        '--enable-continuous-cloudwatch-log': ''
+        '--enable-spark-ui': ''
+        '--TempDir': !Sub s3://project-processed-data-${AWS::AccountId}/temp/
+      GlueVersion: '3.0'
+      NumberOfWorkers: 2
+      WorkerType: G.1X
+      MaxRetries: 1
+
+  # Glue Job 2: ETL Predictions to Redshift
+  GlueETLJobPredictionsToRedshift:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: GlueETLJobPredictionsToRedshift
+      Role: !GetAtt GlueServiceRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub s3://project-processed-data-${AWS::AccountId}/scripts/GlueETLJobPredictionsToRedshift.py
+        PythonVersion: '3'
+      DefaultArguments:
+        '--job-language': python
+        '--enable-metrics': ''
+        '--enable-continuous-cloudwatch-log': ''
+        '--enable-spark-ui': ''
+        '--TempDir': !Sub s3://project-processed-data-${AWS::AccountId}/temp/
+      GlueVersion: '3.0'
+      NumberOfWorkers: 2
+      WorkerType: G.1X
+      MaxRetries: 1
+
+Outputs:
+  VpcId:
+    Value: !Ref ProjectVPC
+    Description: VPC ID
+  PrivateSubnet1Id:
+    Value: !Ref PrivateSubnet1
+    Description: Private Subnet 1 ID
+  PrivateSubnet2Id:
+    Value: !Ref PrivateSubnet2
+    Description: Private Subnet 2 ID
+  PrivateSubnet3Id:
+    Value: !Ref PrivateSubnet3
+    Description: Private Subnet 3 ID
+  SecurityGroupId:
+    Value: !Ref ProjectSecurityGroup
+    Description: Security Group ID
+  RawDataBucketName:
+    Value: !Ref RawDataBucket
+    Description: Raw Data S3 Bucket Name
+  ProcessedDataBucketName:
+    Value: !Ref ProcessedDataBucket
+    Description: Processed Data S3 Bucket Name
+  SageMakerArtifactsBucketName:
+    Value: !Ref SageMakerArtifactsBucket
+    Description: SageMaker Artifacts S3 Bucket Name
+  RedshiftWorkgroupArn:
+    Value: !GetAtt RedshiftWorkgroup.Arn
+    Description: Redshift Serverless Workgroup ARN
+  RedshiftEndpoint:
+    Value: !GetAtt RedshiftWorkgroup.Endpoint.Address
+    Description: Redshift Serverless Endpoint
+  GlueServiceRoleArn:
+    Value: !GetAtt GlueServiceRole.Arn
+    Description: ARN of the Glue IAM Role
+  GlueJobRawToRedshiftName:
+    Value: !Ref GlueETLJobRawToRedshift
+    Description: Name of the Raw to Redshift Glue Job
+  GlueJobPredictionsToRedshiftName:
+    Value: !Ref GlueETLJobPredictionsToRedshift
+    Description: Name of the Predictions to Redshift Glue Job
