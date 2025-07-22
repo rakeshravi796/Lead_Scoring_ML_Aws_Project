@@ -1,3 +1,8 @@
+"""
+    This Glue Function is used to check duplicates and change PlaceHolder Select into NA. 
+    Then it is Loaded into Redhsift
+"""
+
 import sys
 from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
