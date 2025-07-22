@@ -1,3 +1,8 @@
+"""
+    This GLue function does feature Engineering by extracting data from Redhsift and puts into a bucket for training data. 
+"""
+
+
 import sys
 from awsglue.transforms import Transform
 from awsglue.utils import getResolvedOptions
